@@ -99,6 +99,7 @@ module Delayed
 
         def self.reserve_with_scope_using_optimized_sql(ready_scope, worker, now)
           case connection.adapter_name
+<<<<<<< HEAD
           when "PostgreSQL", "PostGIS"
             reserve_with_scope_using_optimized_postgres(ready_scope, worker, now)
           when "MySQL", "Mysql2"
@@ -106,6 +107,32 @@ module Delayed
           when "MSSQL", "Teradata"
             reserve_with_scope_using_optimized_mssql(ready_scope, worker, now)
           # Fallback for unknown / other DBMS
+=======
+          when 'PostgreSQL'
+            # Custom SQL required for PostgreSQL because postgres does not support UPDATE...LIMIT
+            # This locks the single record 'FOR UPDATE' in the subquery (http://www.postgresql.org/docs/9.0/static/sql-select.html#SQL-FOR-UPDATE-SHARE)
+            # Note: active_record would attempt to generate UPDATE...LIMIT like sql for postgres if we use a .limit() filter, but it would not use
+            # 'FOR UPDATE' and we would have many locking conflicts
+            quoted_table_name = connection.quote_table_name(table_name)
+            subquery_sql      = ready_scope.limit(1).lock(true).select('id').to_sql
+            reserved          = find_by_sql(["UPDATE #{quoted_table_name} SET locked_at = ?, locked_by = ? WHERE id IN (#{subquery_sql}) RETURNING *", now, worker.name])
+            reserved[0]
+          when 'MySQL', 'Mysql2'
+            # Revert to more stable lookup without locking issues
+            reserve_with_scope_using_default_sql(ready_scope, worker, now)
+
+          when 'MSSQL', 'Teradata'
+            # The MSSQL driver doesn't generate a limit clause when update_all is called directly
+            subsubquery_sql = ready_scope.limit(1).to_sql
+            # select("id") doesn't generate a subquery, so force a subquery
+            subquery_sql = "SELECT id FROM (#{subsubquery_sql}) AS x"
+            quoted_table_name = connection.quote_table_name(table_name)
+            sql = ["UPDATE #{quoted_table_name} SET locked_at = ?, locked_by = ? WHERE id IN (#{subquery_sql})", now, worker.name]
+            count = connection.execute(sanitize_sql(sql))
+            return nil if count == 0
+            # MSSQL JDBC doesn't support OUTPUT INSERTED.* for returning a result set, so query locked row
+            where(:locked_at => now, :locked_by => worker.name, :failed_at => nil).first
+>>>>>>> d311b55 (Revert to more stable lookup without locking issues)
           else
             reserve_with_scope_using_default_sql(ready_scope, worker, now)
           end
